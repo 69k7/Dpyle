@@ -1,0 +1,7 @@
+pystyle
+colorama
+customtkinter
+tkinterdnd2
+Pygments
+requests
+Pillow
