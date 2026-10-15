@@ -32,6 +32,9 @@ from backend import (
     hidden_files,
     launch_extractor,
     record_decompilation,
+    extract_resources,
+    resource_folders,
+    resource_file_for_member,
     reset_work_folder,
     send_discord_webhook_message,
 )
@@ -63,6 +66,17 @@ TRANSLATIONS = TRANSLATION_CATALOG["fr"]
 
 def t(key: str, **values: object) -> str:
     return TRANSLATIONS[key].format(**values)
+
+
+def file_tree_sort_key(
+    entry: Path,
+    resource_directories: dict[str, str],
+) -> tuple[bool, str]:
+    relative_path = entry.relative_to(WORK_FOLDER).as_posix()
+    source_file = resource_directories.get(relative_path)
+    if source_file:
+        return True, Path(source_file).name.lower()
+    return entry.is_file(), entry.name.lower()
 
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
@@ -427,6 +441,8 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.executable_name: str | None = None
         self.main_pyc_candidate: Path | None = None
         self._file_load_id = 0
+        self._resource_extractions_in_progress: set[Path] = set()
+        self._expanded_directories: set[str] = set()
         self._loading_job: str | None = None
         self._rendering_source = False
         self._decompilation_in_progress = False
@@ -525,6 +541,7 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             return
 
         self.executable_name = executable.stem.lower()
+        self._expanded_directories.clear()
         self.status.configure(text=t("extracting", name=executable.name))
         def worker() -> None:
             try:
@@ -590,11 +607,18 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.open_file(candidate)
         self.after_idle(self.decompile_current_file)
 
-    def populate_tree(self) -> None:
+    def populate_tree(self, expanded_directory: str | None = None) -> None:
         for widget in self.file_list.winfo_children():
             widget.destroy()
         if not WORK_FOLDER.exists():
             return
+        if expanded_directory is not None:
+            self._expanded_directories.add(expanded_directory)
+        self._expanded_directories = {
+            relative_path
+            for relative_path in self._expanded_directories
+            if (WORK_FOLDER / Path(relative_path)).is_dir()
+        }
 
         # Keep the breathing room inside the scrollable content area.
         ctk.CTkFrame(
@@ -602,7 +626,13 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             height=10,
             fg_color="transparent",
         ).pack(fill="x")
-        self.add_directory(self.file_list, WORK_FOLDER, 0, hidden_files())
+        self.add_directory(
+            self.file_list,
+            WORK_FOLDER,
+            0,
+            hidden_files(),
+            resource_folders(),
+        )
         ctk.CTkFrame(
             self.file_list,
             height=10,
@@ -615,12 +645,16 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         directory: Path,
         depth: int,
         hidden: set[str],
+        resource_directories: dict[str, str],
     ) -> None:
         entries = [
             entry
             for entry in sorted(
                 directory.iterdir(),
-                key=lambda item: (item.is_file(), item.name.lower()),
+                key=lambda item: file_tree_sort_key(
+                    item,
+                    resource_directories,
+                ),
             )
             if entry.relative_to(WORK_FOLDER).as_posix() not in hidden
         ]
@@ -636,21 +670,29 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for entry in entries:
             if entry.is_dir():
+                relative_path = entry.relative_to(WORK_FOLDER).as_posix()
+                source_file = resource_directories.get(relative_path)
+                if source_file:
+                    folder_icon, icon_color = self.file_icon(Path(source_file))
+                    folder_name = Path(source_file).name
+                else:
+                    folder_icon, icon_color = "📁", "#f2c94c"
+                    folder_name = entry.name
                 row = ctk.CTkFrame(parent, fg_color="transparent")
                 if depth:
                     ctk.CTkLabel(row, text="", width=16).pack(side="left")
                 icon_label = ctk.CTkLabel(
                     row,
-                    text="📁",
+                    text=folder_icon,
                     width=38,
                     anchor="e",
                     font=("Segoe UI Emoji", 16),
-                    text_color="#f2c94c",
+                    text_color=icon_color,
                 )
                 icon_label.pack(side="left", padx=(0, 4))
                 folder_button = ctk.CTkButton(
                     row,
-                    text=entry.name,
+                    text=folder_name,
                     anchor="w",
                     fg_color="transparent",
                     hover_color=("#141414", "#101010"),
@@ -663,13 +705,31 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 ctk.CTkLabel(branch_frame, text="", width=16).pack(side="left")
                 children_frame = ctk.CTkFrame(branch_frame, fg_color="transparent")
                 children_frame.pack(side="left", fill="x", expand=True)
-                self.add_directory(children_frame, entry, depth + 1, hidden)
-                branch_frame.pack_forget()
+                self.add_directory(
+                    children_frame,
+                    entry,
+                    depth + 1,
+                    hidden,
+                    resource_directories,
+                )
+                if relative_path in self._expanded_directories:
+                    branch_frame.pack(fill="x", after=row)
+                    if not source_file:
+                        icon_label.configure(text="📂")
+                else:
+                    branch_frame.pack_forget()
                 folder_button.configure(
                     command=lambda button=folder_button, icon=icon_label,
-                    row_frame=row, frame=branch_frame, item_name=entry.name:
+                    row_frame=row, frame=branch_frame,
+                    virtual_icon=folder_icon if source_file else None,
+                    folder_path=relative_path:
                     self.toggle_directory(
-                        button, icon, row_frame, frame, depth, item_name
+                        button,
+                        icon,
+                        row_frame,
+                        frame,
+                        virtual_icon,
+                        folder_path,
                     )
                 )
                 continue
@@ -713,16 +773,14 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     lambda _event: self.hide_zip_tooltip(),
                     add="+",
                 )
-            if entry.suffix.lower() in {".zip", ".dll", ".pyd"}:
-                tooltip_name = (
-                    t("associated_app")
-                    if entry.suffix.lower() == ".zip"
-                    else "Resource Hacker"
-                )
+            if entry.suffix.lower() == ".zip":
                 file_button.bind(
                     "<Enter>",
-                    lambda _event, file_row=row, name=tooltip_name:
-                    self.show_external_app_tooltip(file_row, name),
+                    lambda _event, file_row=row:
+                    self.show_external_app_tooltip(
+                        file_row,
+                        t("associated_app"),
+                    ),
                     add="+",
                 )
                 file_button.bind(
@@ -737,15 +795,19 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         icon_label: ctk.CTkLabel,
         row: ctk.CTkFrame,
         children_frame: ctk.CTkFrame,
-        depth: int,
-        name: str,
+        virtual_icon: str | None = None,
+        folder_path: str | None = None,
     ) -> None:
         if children_frame.winfo_manager():
             children_frame.pack_forget()
-            icon_label.configure(text="📁")
+            icon_label.configure(text=virtual_icon or "📁")
+            if folder_path is not None:
+                self._expanded_directories.discard(folder_path)
         else:
             children_frame.pack(fill="x", after=row)
-            icon_label.configure(text="📂")
+            icon_label.configure(text=virtual_icon or "📂")
+            if folder_path is not None:
+                self._expanded_directories.add(folder_path)
 
     def bind_button_hover(self, button: ctk.CTkButton) -> None:
         button._hover_animation_job = None
@@ -810,6 +872,7 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             ".txt": ("📄", "#d4d4d4"),
             ".pyc": ("⚙️", "#f2c94c"),
             ".zip": ("💼", "#f2994a"),
+            ".ico": ("🖼️", "#56ccf2"),
             ".pyd": ("🧩", "#bb86fc"),
             ".pyz": ("📦", "#56ccf2"),
             ".dll": ("🪟", "#6fcf97"),
@@ -1038,25 +1101,84 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             return None
 
     def open_file(self, file_path: Path) -> None:
+        resource_hacker = Path(__file__).resolve().parent / "ResourceHacker.exe"
+
+        if file_path.suffix.lower() in {".dll", ".pyd"}:
+            resolved_path = file_path.resolve()
+            if resolved_path in self._resource_extractions_in_progress:
+                return
+
         self._file_load_id += 1
         load_id = self._file_load_id
         self.status.configure(text=file_path.name)
         self.show_webhook_panel([], load_id)
-        if file_path.suffix.lower() in {".dll", ".pyd"}:
+        try:
+            relative_path = file_path.relative_to(WORK_FOLDER).as_posix()
+        except ValueError:
+            relative_path = ""
+        resource_source = (
+            resource_file_for_member(relative_path)
+            if relative_path and file_path.suffix.lower() != ".txt"
+            else None
+        )
+        if resource_source:
             self.stop_loading()
             self.status.configure(text="")
-            resource_hacker = Path(__file__).resolve().parent / "ResourceHacker.exe"
             try:
                 if not resource_hacker.is_file():
-                    raise FileNotFoundError(f"{resource_hacker.name} est introuvable.")
+                    raise FileNotFoundError(
+                        f"{resource_hacker.name} est introuvable."
+                    )
                 subprocess.Popen(
-                    [str(resource_hacker), str(file_path)],
+                    [
+                        str(resource_hacker),
+                        str(WORK_FOLDER / Path(resource_source)),
+                    ],
                     cwd=str(resource_hacker.parent),
                 )
             except OSError as error:
-                self.show_error(t("cannot_open", name=file_path.name, error=error))
+                self.show_error(
+                    t("cannot_open", name=file_path.name, error=error)
+                )
                 return
+            self.current_file = WORK_FOLDER / Path(resource_source)
+            return
+        if file_path.suffix.lower() in {".dll", ".pyd"}:
+            self.stop_loading()
+            self.status.configure(
+                text=t("resource_extracting", name=file_path.name)
+            )
+            self._resource_extractions_in_progress.add(file_path.resolve())
             self.current_file = file_path
+
+            def worker() -> None:
+                try:
+                    extract_resources(file_path)
+                except (
+                    OSError,
+                    subprocess.SubprocessError,
+                    ET.ParseError,
+                    UnicodeError,
+                    ValueError,
+                ) as error:
+                    self.after(
+                        0,
+                        lambda error=error: self.finish_resource_extraction(
+                            load_id,
+                            file_path,
+                            error,
+                        ),
+                    )
+                    return
+                self.after(
+                    0,
+                    lambda: self.finish_resource_extraction(
+                        load_id,
+                        file_path,
+                    ),
+                )
+
+            threading.Thread(target=worker, daemon=True).start()
             return
         if file_path.suffix.lower() == ".zip":
             self.stop_loading()
@@ -1119,6 +1241,31 @@ class DpyleGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def finish_resource_extraction(
+        self,
+        load_id: int,
+        file_path: Path,
+        error: Exception | None = None,
+    ) -> None:
+        self._resource_extractions_in_progress.discard(file_path.resolve())
+        if load_id != self._file_load_id:
+            return
+        self.stop_loading()
+        if error is not None:
+            self.show_error(
+                t(
+                    "resource_extraction_failed",
+                    name=file_path.name,
+                    error=error,
+                )
+            )
+            return
+        self.status.configure(text="")
+        extracted_directory = (
+            file_path.parent / f"EXTRACTED_{file_path.stem}"
+        ).relative_to(WORK_FOLDER).as_posix()
+        self.populate_tree(expanded_directory=extracted_directory)
 
     def start_loading(self, file_name: str) -> None:
         self.stop_loading()

@@ -49,6 +49,8 @@
   <text id="searching_main">Recherche du module Python principal...</text>
   <text id="empty_folder">(dossier vide)</text>
   <text id="cannot_open">Impossible d'ouvrir {name} : {error}</text>
+  <text id="resource_extracting">Extraction des ressources de {name}...</text>
+  <text id="resource_extraction_failed">Impossible d'extraire les ressources de {name} : {error}</text>
   <text id="cannot_read">Impossible de lire {name} : {error}</text>
   <text id="generic_error">Erreur : {message}</text>
   <language code="en">
@@ -101,6 +103,8 @@
     <text id="searching_main">Searching for the main Python module...</text>
     <text id="empty_folder">(empty folder)</text>
     <text id="cannot_open">Unable to open {name}: {error}</text>
+    <text id="resource_extracting">Extracting resources from {name}...</text>
+    <text id="resource_extraction_failed">Unable to extract resources from {name}: {error}</text>
     <text id="cannot_read">Unable to read {name}: {error}</text>
     <text id="generic_error">Error: {message}</text>
   </language>
